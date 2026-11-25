@@ -1,0 +1,172 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"><title>Retro Auto Adventure v1.0</title><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#5c94fc}canvas{display:block;width:100%;height:100%;image-rendering:pixelated}#hud{position:fixed;top:12px;left:10px;font:bold 12px monospace;color:white;text-shadow:2px 2px #333;pointer-events:none}#tip{position:fixed;bottom:12px;right:10px;font:11px monospace;color:#fff;pointer-events:none}</style></head><body><canvas id="c"></canvas><div id="hud"></div><div id="tip">AUTO PLAY | TAP TO PAUSE</div><script>
+(()=>{'use strict';
+const c=document.getElementById('c'),g=c.getContext('2d'),hud=document.getElementById('hud');const W=256,H=440,T=16;c.width=W;c.height=H;g.imageSmoothingEnabled=false;
+let seed=73421,level=1,score=0,lives=3,frames=0,paused=false,camera=0,finish=0,theme=0,terrain=[],solids=[],enemies=[],coins=[],deaths=0;
+const rand=()=>{seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed/4294967296};const r=(a,b)=>a+Math.floor(rand()*(b-a+1));
+const hero={x:32,y:0,w:12,h:16,vy:0,on:false,inv:0,platform:null};
+const assets={};for(const name of ["mario_frame_00", "mario_frame_01", "mario_frame_02", "mario_frame_03", "mario_frame_04", "mario_frame_05", "mario_frame_06", "mario_frame_07", "mario_frame_08", "mario_frame_09", "mario_frame_10", "question", "brick", "goomba", "pipe", "cloud", "hill"] ){const img=new Image();img.src='assets/'+name+'.png';assets[name]=img;}
+function sprite(name,x,y,w,h){const im=assets[name];if(!im||!im.complete||!im.naturalWidth)return false;g.drawImage(im,Math.round(x),Math.round(y),Math.round(w),Math.round(h));return true;}
+const groundAt=x=>{let i=Math.floor(x/T);return i>=0&&i<terrain.length?terrain[i]:null};
+function generate(){terrain=Array(330).fill(352);solids=[];enemies=[];coins=[];camera=0;theme=(level-1)%3;
+let i=12;while(i<300){let kind=r(0,6);let len=r(9,15);let base=terrain[Math.max(0,i-1)]??352;
+if(kind===0||kind===1){let step=kind===0?-16:16;let next=Math.max(304,Math.min(368,base+step));for(let j=i;j<Math.min(320,i+len);j++)terrain[j]=next;}
+else if(kind===2){let width=r(2,3);let pos=i+3;for(let j=pos;j<pos+width;j++)terrain[j]=null;}
+else if(kind===3){let x=(i+3)*T;let h=r(2,3)*T;solids.push({x,y:base-h,w:32,h,type:'pipe'});}
+else if(kind===4){let x=(i+3)*T;for(let j=0;j<3;j++)solids.push({x:x+j*16,y:base-70-(j===1?16:0),w:16,h:16,type:'brick'});coins.push({x:x+22,y:base-110,taken:false});}
+else if(kind===5){let x=(i+4)*T;enemies.push({x,y:base-16,w:16,h:16,alive:true});if(rand()<.45)enemies.push({x:x+27,y:base-16,w:16,h:16,alive:true});}
+else{let x=(i+3)*T;for(let j=0;j<3;j++)solids.push({x:x+j*16,y:base-16*(j+1),w:16,h:16*(j+1),type:'stair'});}
+i+=len;}
+// Ground enemies using the FINAL terrain, not a stale segment height.
+// Never place enemies above gaps or on the edge of a terrain transition.
+enemies=enemies.filter(e=>{let a=groundAt(e.x+2),b=groundAt(e.x+e.w-2);if(a===null||b===null||a===undefined||b===undefined||a!==b)return false;e.y=a-e.h;return true;});
+finish=terrain.length*T-210;for(let j=terrain.length-17;j<terrain.length;j++)terrain[j]=352;hero.x=32;hero.y=terrain[2]-hero.h;hero.vy=0;hero.on=true;hero.inv=90;}
+function overlap(a,b){return a.x<b.x+b.w&&a.x+a.w>b.x&&a.y<b.y+b.h&&a.y+a.h>b.y;}
+function getSurfaces(){const arr=[];let start=0,prev=terrain[0];for(let i=1;i<=terrain.length;i++){let v=i<terrain.length?terrain[i]:undefined;if(v!==prev){if(prev!==null&&prev!==undefined)arr.push({x:start*T,y:prev,w:(i-start)*T,h:H-prev,type:'ground'});start=i;prev=v;}}return arr.concat(solids);}
+let surfaces=[];
+function safeSpawn(){hero.x=Math.max(32,hero.x-95);let tries=0;while((groundAt(hero.x+6)===null||solids.some(s=>overlap({x:hero.x,y:(groundAt(hero.x+6)??352)-hero.h,w:hero.w,h:hero.h},s)))&&tries++<80)hero.x-=T;hero.x=Math.max(32,hero.x);hero.y=(groundAt(hero.x+6)??352)-hero.h;hero.vy=0;hero.on=true;hero.inv=100;}
+function die(){deaths++;lives--;score=Math.max(0,score-100);if(lives<=0){lives=3;level=1;seed+=17;generate();return;}safeSpawn();}
+function nextHazard(){
+ const front=hero.x+hero.w;
+ const foot=hero.y+hero.h;
+ // Locate the EXACT start of a gap; the old implementation rounded to tiles
+ // and triggered a jump too early, landing Mario in the middle of the gap.
+ let gap=null;
+ for(let tx=Math.floor(front/T);tx<Math.ceil((front+95)/T);tx++){
+  if(terrain[tx]!==null)continue;
+  const edge=tx*T;
+  if(edge<front-2)continue;
+  let end=tx;while(terrain[end]===null)end++;
+  gap={d:edge-front,width:(end-tx)*T,edge};break;
+ }
+ // Gaps have absolute priority, including when an enemy is nearby.
+ if(gap && gap.d<34)return {type:'gap',...gap};
+ let best=null;
+ function consider(d,type,obj){if(d>=-3&&d<85&&(!best||d<best.d))best={d,type,obj};}
+ for(const s of solids){
+  // Only obstacles actually intersecting the current running height.
+  if(s.x+s.w>front&&s.y<foot-3&&s.y+s.h>hero.y+5)consider(s.x-front,'solid',s);
+ }
+ for(const e of enemies)if(e.alive&&e.x+e.w>front&&e.y+e.h>hero.y+5&&e.y<foot+8)consider(e.x-front,'enemy',e);
+ // A step-up begins where the height changes; steps down don't require a jump.
+ const current=groundAt(front-2);
+ for(let tx=Math.floor(front/T);tx<Math.ceil((front+80)/T);tx++){
+  const x=tx*T,y=terrain[tx];
+  if(y!==null&&current!==null&&y<current-6&&x>=front-2){consider(x-front,'step',{height:current-y});break;}
+ }
+ if(gap && (!best||gap.d<best.d+14))return {type:'gap',...gap};
+ return best;
+}
+function ai(){
+ if(!hero.on)return;
+ const h=nextHazard();if(!h)return;
+ // At 1.45 px/frame, -8.9 jump and .37 gravity, flight is about 48 frames
+ // (roughly 70px).  Jump 8-12px before a gap instead of 51px before it.
+ const limit=h.type==='gap'?8:h.type==='enemy'?34:h.type==='solid'?34:30;
+ if(h.d<=limit&&h.d>=-3){
+  // Higher jumps for the widest gaps; the maximum generated gap is 48px.
+  hero.vy=h.type==='gap'&&h.width>=48?-9.8:-8.9;
+  hero.on=false;
+ }
+}
+function tick(){frames++;if(hero.inv>0)hero.inv--;surfaces=getSurfaces();ai();let old={x:hero.x,y:hero.y,w:hero.w,h:hero.h};let vx=1.45;
+// horizontal collision with solid surfaces; prevent phasing through pipe sides
+hero.x+=vx;for(const s of surfaces){if(overlap(hero,s)&&old.x+old.w<=s.x+2&&old.y+old.h>s.y+2){hero.x=s.x-hero.w;vx=0;}}
+hero.vy=Math.min(10,hero.vy+.37);hero.y+=hero.vy;hero.on=false;
+// land on solid tops, including pipe tops, steps and raised terrain
+if(hero.vy>=0){let landing=null;for(const s of surfaces){if(hero.x+hero.w>s.x+2&&hero.x<s.x+s.w-2&&old.y+hero.h<=s.y+2&&hero.y+hero.h>=s.y){if(!landing||s.y<landing.y)landing=s;}}if(landing){hero.y=landing.y-hero.h;hero.vy=0;hero.on=true;hero.platform=landing;}}
+else{for(const s of surfaces){if(hero.x+hero.w>s.x+2&&hero.x<s.x+s.w-2&&old.y>=s.y+s.h-2&&hero.y<s.y+s.h){hero.y=s.y+s.h;hero.vy=0;break;}}}
+// collision with enemies: stomp vs side hit
+for(const e of enemies){if(!e.alive)continue;if(overlap(hero,e)){if(old.y+hero.h<=e.y+6&&hero.vy>=0){e.alive=false;hero.y=e.y-hero.h;hero.vy=-5.2;hero.on=false;score+=100;}else if(hero.inv<=0){die();return;}}}
+for(const coin of coins){if(!coin.taken&&Math.abs(hero.x-coin.x)<12&&Math.abs(hero.y-coin.y)<22){coin.taken=true;score+=50;}}
+if(hero.y>H+30){die();return;}
+if(hero.x>finish){level++;score+=500;lives=Math.min(5,lives+1);generate();return;}
+camera=Math.max(0,hero.x-67);score+=.05;}
+function rect(x,y,w,h,col){g.fillStyle=col;g.fillRect(Math.round(x),Math.round(y),Math.ceil(w),Math.ceil(h));}
+// Sparse, repeating scenery clusters: NES-era visual rhythm without copying ROM assets.
+function cloud(x,y,large=false){if(sprite("cloud",x,y,large?48:32,large?36:24))return;
+ const w=large?48:32;
+ rect(x+4,y+9,w-8,11,'#fff');rect(x+10,y+4,w-20,17,'#fff');
+ rect(x+15,y,w-30,10,'#fff');rect(x+2,y+12,4,5,'#d9efff');rect(x+w-6,y+12,4,5,'#d9efff');
+}
+function hill(x,base,large=false){if(sprite("hill",x,base-(large?32:16),large?64:32,large?32:16))return;
+ const w=large?72:48,h=large?42:29;
+ rect(x+6,base-10,w-12,10,'#38b947');
+ for(let row=0;row<h-10;row+=4){const inset=Math.floor((h-10-row)/7)*4;rect(x+inset,base-h+row,w-inset*2,4,'#38b947');}
+ rect(x+Math.round(w*.32),base-16,5,8,'#1d8c3d');rect(x+Math.round(w*.64),base-16,5,8,'#1d8c3d');
+ rect(x+Math.round(w*.42),base-30,7,5,'#83dc69');
+}
+function bush(x,base,wide=false){
+ const w=wide?60:40;
+ rect(x+5,base-10,w-10,10,'#1da34b');
+ rect(x+9,base-18,w-18,12,'#39c75c');
+ rect(x+16,base-23,w-32,8,'#39c75c');
+ rect(x+7,base-8,w-14,3,'#137c39');
+}
+function bg(){
+ rect(0,0,W,H,theme===0?'#5c94fc':theme===1?'#18183b':'#46485d');
+ if(theme!==0)return;
+ // Fixed scenery map tied to world coordinates; no abrupt wrapping or random crowds.
+ const scenery=[
+  {x:36,t:'hill',large:false},{x:166,t:'cloud',y:67,large:false},
+  {x:270,t:'bush',large:true},{x:400,t:'cloud',y:104,large:true},
+  {x:525,t:'hill',large:true},{x:700,t:'cloud',y:67,large:false},
+  {x:840,t:'bush',large:false},{x:975,t:'hill',large:false},
+  {x:1080,t:'cloud',y:91,large:true},{x:1225,t:'bush',large:true}
+ ];
+ const period=1320;
+ const first=Math.floor((camera-130)/period),last=Math.ceil((camera+W+130)/period);
+ for(let k=first;k<=last;k++)for(const o of scenery){
+  const x=Math.round(o.x+k*period-camera*.6);
+  if(x< -100||x>W+100)continue;
+  if(o.t==='cloud')cloud(x,o.y,o.large);
+  else if(o.t==='hill')hill(x,352,o.large);
+  else bush(x,352,o.large);
+ }
+}
+function drawGround(){for(let x=Math.floor(camera/T)*T;x<camera+W+T;x+=T){let y=groundAt(x+8);if(y===null||y===undefined)continue;let px=x-camera;rect(px,y,T,H-y,theme===0?'#bb7546':'#74524b');rect(px,y,T,3,theme===0?'#d7a06d':'#9b8881');for(let yy=y+17;yy<H;yy+=16){rect(px,yy,16,2,'#884422');rect(px+7,yy+2,2,14,'#884422');}}}
+function drawSolid(s){let x=s.x-camera;if(x<-60||x>W+60)return;let y=s.y;if(s.type==='pipe'){
+ const im=assets.pipe;if(im&&im.complete&&im.naturalWidth){g.drawImage(im,0,0,im.width,16,Math.round(x),Math.round(y),32,16);if(s.h>16)g.drawImage(im,0,16,im.width,im.height-16,Math.round(x),Math.round(y+16),32,Math.round(s.h-16));return;}
+ rect(x,y,s.w,s.h,'#17853b');rect(x-3,y,s.w+6,9,'#32bb54');rect(x-3,y,3,9,'#11652c');rect(x+s.w,y,3,9,'#0b5225');
+ rect(x+4,y+2,5,5,'#a2f19a');rect(x+8,y+10,5,s.h-10,'#69dc73');rect(x+s.w-8,y+10,5,s.h-10,'#0c572b');
+ rect(x-3,y+8,s.w+6,2,'#0c5d29');
+ }else{for(let xx=0;xx<s.w;xx+=16)for(let yy=0;yy<s.h;yy+=16){drawBrickTile(x+xx,y+yy,s.type==='brick'&&Math.floor(xx/16)===1&&yy===0);}}}
+function drawEnemy(e){if(!e.alive)return;if(sprite("goomba",e.x-camera,e.y,16,16))return;let x=e.x-camera,y=e.y;rect(x+3,y+2,9,5,'#aa5a29');rect(x+1,y+7,13,7,'#a75b2e');rect(x+4,y+7,3,4,'#fff');rect(x+9,y+7,3,4,'#fff');rect(x+5,y+8,2,3,'#22150d');rect(x+10,y+8,2,3,'#22150d');rect(x,y+13,5,3,'#4c2919');rect(x+10,y+13,5,3,'#4c2919');}
+// Pixel sprites are newly drawn for this project, not extracted from a commercial ROM.
+const SPRITES={
+ run1:[
+'.....RRRRR......','....RRRRRRRRR...','....BBBSSS......','...BSBSSSSSS....','...BSBBSSSSSS...','...BBSSSSBBB....','.....SSSSSS.....','....RRBRRRR......','...RRRBRRRRR.....','..SSRRBBRRSS.....','..SSBBBBBBSS.....','...BBBBBBBB......','...BBBBBBBB......','...BBB..BBB......','..DDD....DDD.....','..DDDD...DDDD....'],
+ run2:[
+'.....RRRRR......','....RRRRRRRRR...','....BBBSSS......','...BSBSSSSSS....','...BSBBSSSSSS...','...BBSSSSBBB....','.....SSSSSS.....','....RRBRRRR......','...RRRBRRRRR.....','..SSRRBBRRSS.....','..SSBBBBBBSS.....','...BBBBBBBB......','....BBBBBB.......','...BBB.BBB.......','..DDD...DDD......','..DDDD..DDDD.....'],
+ jump:[
+'.....RRRRR......','....RRRRRRRRR...','....BBBSSS......','...BSBSSSSSS....','...BSBBSSSSSS...','...BBSSSSBBB....','.....SSSSSS.....','..SSRRBRRRR......','..SSRRBRRRRR.....','...RRRBBRRSS.....','...BBBBBBBBSS....','....BBBBBBB......','....BBBBBB.......','...BBB..BBB......','..DDD....DDD.....','..DDDD...DDDD....']
+};
+const PIX={R:'#e83c2e',B:'#744027',S:'#f8b88c',D:'#553021'};
+function drawHero(){
+ if(hero.inv>0&&Math.floor(frames/5)%2===0)return;
+ // The provided running sprite doubles as an airborne pose until a dedicated jump sprite arrives.
+ const frameName=!hero.on?'mario_frame_10':('mario_frame_'+String(Math.floor(frames/5)%10).padStart(2,'0'));
+ if(sprite(frameName,hero.x-camera-2,hero.y,16,16))return;
+ if(hero.inv>0&&Math.floor(frames/5)%2===0)return;
+ const x=Math.round(hero.x-camera)-2,y=Math.round(hero.y);
+ const frame=!hero.on?'jump':Math.floor(frames/7)%2?'run1':'run2';
+ const p=SPRITES[frame];
+ // 16x16 character with hand-drawn red cap, face, moustache, blue dungarees, boots.
+ for(let j=0;j<p.length;j++)for(let i=0;i<p[j].length;i++){
+  const ch=p[j][i];if(ch==='.')continue;
+  let color=PIX[ch];
+  if(ch==='B'&&j>=8&&j<=13)color='#2266d1';
+  rect(x+i*2,y+j*2,2,2,color);
+ }
+ // golden overall clasps
+ rect(x+12,y+20,2,2,'#ffe066');rect(x+22,y+20,2,2,'#ffe066');
+}
+function drawBrickTile(x,y,question=false){if(question&&sprite("question",x,y,16,16))return;if(!question&&sprite("brick",x,y,16,16))return;
+ rect(x,y,16,16,question?'#e7a83d':'#b86d3e');
+ rect(x,y,16,1,'#ffce83');rect(x,y+15,16,1,'#68351f');
+ if(question){rect(x+5,y+3,6,2,'#fff0b3');rect(x+10,y+5,2,4,'#fff0b3');rect(x+7,y+8,4,2,'#fff0b3');rect(x+7,y+12,2,2,'#fff0b3');}
+ else{rect(x,y+7,16,2,'#72351e');rect(x+7,y,2,8,'#72351e');rect(x+3,y+9,2,7,'#72351e');rect(x+13,y+9,2,7,'#72351e');}
+}
+function draw(){bg();drawGround();for(const s of solids)drawSolid(s);for(const coin of coins)if(!coin.taken){let x=coin.x-camera;rect(x,coin.y,7,11,'#ffdd43');rect(x+2,coin.y+2,3,7,'#fff5a4');}for(const e of enemies)drawEnemy(e);let fx=finish-camera;if(fx>-20&&fx<W+20){rect(fx,245,3,107,'#eee');rect(fx+3,246,24,15,'#49b34e');rect(fx+8,251,8,3,'#f8f8f8');rect(fx+9,256,5,2,'#f8f8f8');}drawHero();hud.textContent='WORLD '+String(level).padStart(2,'0')+'  SCORE '+Math.floor(score)+'  LIFE '+lives+'  MISS '+deaths;if(paused){rect(53,188,150,48,'#111');g.fillStyle='white';g.font='bold 16px monospace';g.fillText('PAUSED',95,217);}}
+let last=0,acc=0;function loop(t){if(!last)last=t;acc+=Math.min(80,t-last);last=t;while(acc>=16.6667){if(!paused)tick();acc-=16.6667;}draw();requestAnimationFrame(loop);}generate();requestAnimationFrame(loop);c.addEventListener('click',()=>paused=!paused);document.addEventListener('visibilitychange',()=>paused=document.hidden);
+})();
+</script></body></html>

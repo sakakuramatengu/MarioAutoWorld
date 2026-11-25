@@ -1,0 +1,309 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"><title>Retro Auto Adventure v2.5</title><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#5c94fc}canvas{display:block;width:min(100vw,58.18vh);height:min(100vh,171.875vw);margin:auto;image-rendering:pixelated}#hud{display:none}.hud-grid{display:grid;grid-template-columns:1.35fr .85fr 1fr .8fr .65fr;gap:3px;align-items:start;text-align:center;padding:0 6px;box-sizing:border-box}.coin-hud{padding-top:12px;white-space:nowrap}#tip{position:fixed;bottom:12px;right:10px;font:11px monospace;color:#fff;pointer-events:none}</style></head><body><canvas id="c"></canvas><div id="hud"></div><div id="tip">AUTO PLAY | TAP TO PAUSE</div><script>
+(()=>{'use strict';
+const c=document.getElementById('c'),g=c.getContext('2d'),hud=document.getElementById('hud');const W=256,H=440,T=16;c.width=W;c.height=H;g.imageSmoothingEnabled=false;
+let seed=73421,level=1,score=0,lives=3,coinCount=0,stageFrames=0,stageTime=400,frames=0,paused=false,camera=0,finish=0,theme=0,terrain=[],bridges=[],solids=[],enemies=[],coins=[],pops=[],deaths=0;
+const rand=()=>{seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed/4294967296};const r=(a,b)=>a+Math.floor(rand()*(b-a+1));
+const hero={x:32,y:0,w:12,h:16,vy:0,on:false,inv:0,platform:null,speed:1.45,running:false,anim:0};
+const assets={};for(const name of ["mario_frame_00", "mario_frame_01", "mario_frame_02", "mario_frame_03", "mario_frame_04", "mario_frame_05", "mario_frame_06", "mario_frame_07", "mario_frame_08", "mario_frame_09", "mario_frame_10", "question", "brick", "goomba", "pipe", "cloud", "hill", "ground", "bridge", "tree", "used", "coin", "extra_sheet", "goal_flag"] ){const img=new Image();img.src='assets/'+name+'.png';assets[name]=img;}
+function sprite(name,x,y,w,h){const im=assets[name];if(!im||!im.complete||!im.naturalWidth)return false;g.drawImage(im,Math.round(x),Math.round(y),Math.round(w),Math.round(h));return true;}
+const groundAt=x=>{let i=Math.floor(x/T);return i>=0&&i<terrain.length?terrain[i]:null};
+function generate(){stageFrames=0;stageTime=400;terrain=Array(330).fill(352);bridges=[];solids=[];enemies=[];coins=[];pops=[];camera=0;theme=0;
+let i=12;while(i<300){let kind=r(0,6);let len=r(9,15);let base=terrain[Math.max(0,i-1)]??352;
+if(kind===0||kind===1){let step=kind===0?-16:16;let next=Math.max(304,Math.min(368,base+step));for(let j=i;j<Math.min(320,i+len);j++)terrain[j]=next;}
+else if(kind===2){let width=r(2,7);let pos=i+3;for(let j=pos;j<pos+width;j++)terrain[j]=null;}
+else if(kind===3){let x=(i+3)*T;let h=r(2,3)*T;solids.push({x,y:base-h,w:32,h,type:'pipe'});}
+else if(kind===4){let x=(i+3)*T;for(let j=0;j<3;j++)solids.push({x:x+j*16,y:base-64,w:16,h:16,type:j===1?'question':'brick',used:false,bump:0});}
+else if(kind===5){let x=(i+4)*T;enemies.push({x,y:base-16,w:16,h:16,alive:true,dir:-1,walk:0});if(rand()<.45)enemies.push({x:x+27,y:base-16,w:16,h:16,alive:true,dir:-1,walk:0});}
+else{
+ // Vary stair structures: flat rows of 3/5 blocks, or 1-5 rising/falling steps.
+ const x=(i+3)*T, shape=r(0,2);
+ if(shape===0){
+  const width=rand()<.5?3:5;
+  for(let j=0;j<width;j++)solids.push({x:x+j*T,y:base-T,w:T,h:T,type:'stair'});
+ }else{
+  const steps=r(1,5),descending=shape===2;
+  for(let j=0;j<steps;j++){
+   const height=(descending?steps-j:j+1)*T;
+   solids.push({x:x+j*T,y:base-height,w:T,h:height,type:'stair'});
+  }
+ }
+}
+i+=len;}
+// Wide gaps (4-7 tiles) get an ELEVATED bridge, not a ground-level deck.
+// The first gap tile is left open to force a running jump onto the bridge.
+for(let tx=1;tx<terrain.length-1;){
+ if(terrain[tx]!==null){tx++;continue;}
+ const start=tx;while(tx<terrain.length&&terrain[tx]===null)tx++;
+ const width=tx-start,left=terrain[start-1],right=terrain[tx];
+ if(width>=4&&left!=null&&right!=null){
+  const y=Math.min(left,right)-48;
+  bridges.push({x:(start+1)*T,y,w:(width-1)*T,h:8,type:'bridge',gapStart:start*T,gapWidth:width*T});
+ }
+}
+// Re-anchor pipes to the FINAL ground at both feet. Never leave pipes
+// floating, embedded, or hanging over a gap/terrain transition.
+solids=solids.filter(b=>{
+ if(b.type!=='pipe')return true;
+ const first=Math.floor((b.x+1)/T),last=Math.floor((b.x+b.w-1)/T);
+ const floor=terrain[first];
+ if(floor===null||floor===undefined)return false;
+ for(let k=first;k<=last;k++)if(terrain[k]!==floor)return false;
+ b.y=floor-b.h;
+ return true;
+});
+// Ground enemies using the FINAL terrain, not a stale segment height.
+// Never place enemies above gaps or on the edge of a terrain transition.
+enemies=enemies.filter(e=>{let a=groundAt(e.x+2),b=groundAt(e.x+e.w-2);if(a===null||b===null||a===undefined||b===undefined||a!==b)return false;e.y=a-e.h;return true;});
+finish=terrain.length*T-210;for(let j=terrain.length-17;j<terrain.length;j++)terrain[j]=352;hero.x=32;hero.y=terrain[2]-hero.h;hero.vy=0;hero.on=true;hero.inv=90;hero.speed=1.45;hero.running=false;hero.anim=0;}
+function overlap(a,b){return a.x<b.x+b.w&&a.x+a.w>b.x&&a.y<b.y+b.h&&a.y+a.h>b.y;}
+function getSurfaces(){const arr=[];let start=0,prev=terrain[0];for(let i=1;i<=terrain.length;i++){let v=i<terrain.length?terrain[i]:undefined;if(v!==prev){if(prev!==null&&prev!==undefined)arr.push({x:start*T,y:prev,w:(i-start)*T,h:H-prev,type:'ground'});start=i;prev=v;}}return arr.concat(solids,bridges);}
+let surfaces=[];
+function safeSpawn(){hero.x=Math.max(32,hero.x-95);let tries=0;while((groundAt(hero.x+6)===null||solids.some(s=>overlap({x:hero.x,y:(groundAt(hero.x+6)??352)-hero.h,w:hero.w,h:hero.h},s)))&&tries++<80)hero.x-=T;hero.x=Math.max(32,hero.x);hero.y=(groundAt(hero.x+6)??352)-hero.h;hero.vy=0;hero.on=true;hero.inv=100;hero.speed=1.45;hero.running=false;}
+function die(){deaths++;lives--;if(lives<=0){lives=3;level=1;coinCount=0;score=0;seed+=17;generate();return;}stageFrames=0;stageTime=400;safeSpawn();}
+function collectCoin(){score+=100;coinCount++;if(coinCount>=100){coinCount-=100;lives++;}}
+function worldLabel(){return Math.floor((level-1)/4)+1+'-'+((level-1)%4+1);}
+function nextHazard(){
+ const front=hero.x+hero.w;
+ const foot=hero.y+hero.h;
+ // The bridge starts one tile INSIDE wide gaps. Jump from the near bank
+ // even when a raised bridge exists, instead of treating it as flat ground.
+ let gap=null;
+ for(let tx=Math.floor(front/T);tx<Math.ceil((front+100)/T);tx++){
+  if(terrain[tx]!==null)continue;
+  const edge=tx*T;
+  if(edge<front-2)continue;
+  let end=tx;while(end<terrain.length&&terrain[end]===null)end++;
+  const width=(end-tx)*T;
+  const elevated=bridges.some(b=>b.gapStart===edge);
+  gap={d:edge-front,width,edge,elevated};break;
+ }
+ // Gaps have absolute priority, including when an enemy is nearby.
+ if(gap && gap.d<34)return {type:'gap',...gap};
+ let best=null;
+ function consider(d,type,obj){if(d>=-3&&d<85&&(!best||d<best.d))best={d,type,obj};}
+ for(const s of solids){
+  // Only obstacles actually intersecting the current running height.
+  if(s.x+s.w>front&&s.y<foot-3&&s.y+s.h>hero.y+5)consider(s.x-front,'solid',s);
+ }
+ for(const e of enemies)if(e.alive&&e.x+e.w>front&&e.y+e.h>hero.y+5&&e.y<foot+8)consider(e.x-front,'enemy',e);
+ // A step-up begins where the height changes; steps down don't require a jump.
+ const current=groundAt(front-2);
+ for(let tx=Math.floor(front/T);tx<Math.ceil((front+80)/T);tx++){
+  const x=tx*T,y=terrain[tx];
+  if(y!==null&&current!==null&&y<current-6&&x>=front-2){consider(x-front,'step',{height:current-y});break;}
+ }
+ if(gap && (!best||gap.d<best.d+14))return {type:'gap',...gap};
+ return best;
+}
+function ai(){
+ if(!hero.on)return;
+ // The flagpole base blocks a ground-level finish. Jump before reaching it.
+ // Trigger earlier when running so Mario can clear the base in mid-air.
+ const goalDistance=finish-(hero.x+hero.w);
+ if(goalDistance>=-2&&goalDistance<=Math.max(25,hero.speed*15)){
+  hero.vy=-9.1;hero.on=false;return;
+ }
+ let h=nextHazard();
+ // Delay the question-block jump by 36px relative to v2.0.
+ // Start when Mario is already underneath the question block, so his
+ // rising head hits its underside rather than landing ahead of it.
+ // Predict the horizontal position at the moment Mario's head reaches
+ // the underside. At RUN speed, jump slightly earlier than at WALK speed.
+ const q=solids.find(b=>b.type==='question'&&!b.used&&
+   b.y+b.h<=hero.y+2&&b.y+b.h>=hero.y-65&&
+   b.x-hero.x<65&&b.x+b.w>hero.x-5);
+ if(q){
+  const headRise=(hero.y-(q.y+q.h));
+  const jumpVy=hero.running?-8.25:-7.4;
+  // First contact with the underside happens around 4-5 frames after takeoff.
+  const framesToHit=Math.max(3,Math.min(8,Math.ceil(headRise/(-jumpVy-.5))));
+  const targetX=q.x+q.w/2-hero.w/2-hero.speed*framesToHit;
+  const delta=targetX-hero.x;
+  if(delta<=hero.speed*1.25&&delta>=-hero.speed*1.5&&
+     (!h||h.type!=='gap'||h.d>15)){
+   hero.vy=jumpVy;hero.on=false;return;
+  }
+ }
+ if(!h)return;
+ const limit=h.type==='gap'?Math.max(9,hero.speed*7):h.type==='enemy'?Math.max(34,hero.speed*19):h.type==='solid'?Math.max(34,hero.speed*19):Math.max(30,hero.speed*17);
+ if(h.d<=limit&&h.d>=-3){
+  hero.vy=h.type==='gap'&&h.width>=48?-9.8:-8.9;
+  hero.on=false;
+ }
+}
+function tick(){
+ frames++;
+ stageFrames++;
+ stageTime=Math.max(0,400-Math.floor(stageFrames/60));
+ if(stageTime===0){die();return;}
+ if(hero.inv>0)hero.inv--;
+ // Automatic walk/run cycle: 6 seconds walking, then 4 seconds running.
+ // Speed ramps smoothly to avoid sudden jumps in position.
+ hero.running=(frames%600)>=360;
+ const targetSpeed=hero.running?2.55:1.45;
+ hero.speed+=(targetSpeed-hero.speed)*.12;
+ hero.anim+=hero.speed;
+ surfaces=getSurfaces();ai();
+ let old={x:hero.x,y:hero.y,w:hero.w,h:hero.h};
+ let vx=hero.speed;
+// horizontal collision with solid surfaces; prevent phasing through pipe sides
+hero.x+=vx;
+const goalBase={x:finish-8,y:352-13,w:31,h:13,type:'goal-base'};
+if(overlap(hero,goalBase)&&old.x+old.w<=goalBase.x+2&&old.y+old.h>goalBase.y+2){hero.x=goalBase.x-hero.w;vx=0;}
+for(const s of surfaces){if(overlap(hero,s)&&old.x+old.w<=s.x+2&&old.y+old.h>s.y+2){hero.x=s.x-hero.w;vx=0;}}
+hero.vy=Math.min(10,hero.vy+.37);hero.y+=hero.vy;hero.on=false;
+// land on solid tops, including pipe tops, steps and raised terrain
+if(hero.vy>=0){let landing=null;for(const s of [...surfaces,goalBase]){if(hero.x+hero.w>s.x+2&&hero.x<s.x+s.w-2&&old.y+hero.h<=s.y+2&&hero.y+hero.h>=s.y){if(!landing||s.y<landing.y)landing=s;}}if(landing){hero.y=landing.y-hero.h;hero.vy=0;hero.on=true;hero.platform=landing;}}
+else{for(const s of surfaces){if(hero.x+hero.w>s.x+2&&hero.x<s.x+s.w-2&&old.y>=s.y+s.h-2&&hero.y<s.y+s.h){hero.y=s.y+s.h;hero.vy=0;if(s.type==='question'&&!s.used){s.used=true;s.bump=12;pops.push({x:s.x+4,y:s.y-13,life:26});collectCoin();}break;}}}
+// Move Goombas on solid ground. Reverse at edges, obstacles, or another Goomba.
+for(const e of enemies){
+ if(!e.alive)continue;
+ const speed=.38, nextX=e.x+e.dir*speed;
+ const footL=groundAt(nextX+2), footR=groundAt(nextX+e.w-2);
+ const blocked=solids.some(s=>overlap({x:nextX,y:e.y,w:e.w,h:e.h},s));
+ const other=enemies.some(o=>o!==e&&o.alive&&overlap({x:nextX,y:e.y,w:e.w,h:e.h},o));
+ if(footL===null||footR===null||footL===undefined||footR===undefined||footL!==footR||blocked||other){e.dir*=-1;}
+ else{e.x=nextX;e.y=footL-e.h;e.walk=(e.walk||0)+1;}
+}
+// collision with enemies: stomp vs side hit
+for(const e of enemies){if(!e.alive)continue;if(overlap(hero,e)){if(old.y+hero.h<=e.y+6&&hero.vy>=0){e.alive=false;hero.y=e.y-hero.h;hero.vy=-5.2;hero.on=false;score+=100;}else if(hero.inv<=0){die();return;}}}
+for(const coin of coins){if(!coin.taken&&Math.abs(hero.x-coin.x)<12&&Math.abs(hero.y-coin.y)<22){coin.taken=true;collectCoin();}}
+for(const b of solids)if(b.bump>0)b.bump--;
+for(const p of pops){p.y-=1.35;p.life--;}pops=pops.filter(p=>p.life>0);
+if(hero.y>H+30){die();return;}
+// Clear the flagpole only while airborne above the solid base.
+// The pole base is at the ground; walking into it cannot finish the level.
+if(hero.x+hero.w>finish+8 && hero.y+hero.h<=352-13){level++;score+=1000;generate();return;}
+camera=Math.max(0,hero.x-67);}
+function rect(x,y,w,h,col){g.fillStyle=col;g.fillRect(Math.round(x),Math.round(y),Math.ceil(w),Math.ceil(h));}
+// Sparse, repeating scenery clusters: NES-era visual rhythm without copying ROM assets.
+function cloud(x,y,large=false){if(sprite("cloud",x,y,large?48:32,large?36:24))return;
+ const w=large?48:32;
+ rect(x+4,y+9,w-8,11,'#fff');rect(x+10,y+4,w-20,17,'#fff');
+ rect(x+15,y,w-30,10,'#fff');rect(x+2,y+12,4,5,'#d9efff');rect(x+w-6,y+12,4,5,'#d9efff');
+}
+function hill(x,base,large=false){if(sprite("hill",x,base-(large?36:18),large?72:36,large?36:18))return;
+ const w=large?72:48,h=large?42:29;
+ rect(x+6,base-10,w-12,10,'#38b947');
+ for(let row=0;row<h-10;row+=4){const inset=Math.floor((h-10-row)/7)*4;rect(x+inset,base-h+row,w-inset*2,4,'#38b947');}
+ rect(x+Math.round(w*.32),base-16,5,8,'#1d8c3d');rect(x+Math.round(w*.64),base-16,5,8,'#1d8c3d');
+ rect(x+Math.round(w*.42),base-30,7,5,'#83dc69');
+}
+function bush(x,base,wide=false){
+ const w=wide?60:40;
+ rect(x+5,base-10,w-10,10,'#1da34b');
+ rect(x+9,base-18,w-18,12,'#39c75c');
+ rect(x+16,base-23,w-32,8,'#39c75c');
+ rect(x+7,base-8,w-14,3,'#137c39');
+}
+function bg(){
+ rect(0,0,W,H,theme===0?'#5c94fc':theme===1?'#18183b':'#46485d');
+ if(theme!==0)return;
+ // Fixed scenery map tied to world coordinates; no abrupt wrapping or random crowds.
+ const scenery=[
+  {x:36,t:'hill',large:false},{x:166,t:'cloud',y:67,large:false},
+  {x:400,t:'cloud',y:104,large:true},
+  {x:525,t:'hill',large:true},{x:700,t:'cloud',y:67,large:false},
+  {x:840,t:'tree',large:false},{x:975,t:'hill',large:false},
+  {x:1080,t:'cloud',y:91,large:true},
+ ];
+ const period=1320;
+ const offset=camera; // Ground-attached scenery uses the same world coordinates as terrain.
+ const first=Math.floor((offset-135)/period),last=Math.ceil((offset+W+135)/period);
+ for(let k=first;k<=last;k++)for(const o of scenery){
+  const x=Math.round(o.x+k*period-offset);
+  if(x< -100||x>W+100)continue;
+  if(o.t==='cloud'){cloud(x,o.y,o.large);continue;}
+  // A ground decoration is drawn only over a continuous, level surface.
+  // Otherwise it could hang over a pit or float above a lower ground tile.
+  const worldX=o.x+k*period;
+  const width=o.t==='hill'?(o.large?72:36):o.t==='tree'?16:(o.large?60:40);
+  const left=Math.floor(worldX/T),right=Math.floor((worldX+width-1)/T);
+  const base=terrain[left];
+  if(base===null||base===undefined)continue;
+  let supported=true;
+  for(let tx=left;tx<=right;tx++)if(terrain[tx]!==base){supported=false;break;}
+  if(!supported)continue;
+  if(o.t==='hill')hill(x,base,o.large);
+  else if(o.t==='tree')sprite('tree',x,base-30,16,30);
+ }
+}
+function drawGround(){for(let x=Math.floor(camera/T)*T;x<camera+W+T;x+=T){let y=groundAt(x+8);if(y===null||y===undefined)continue;let px=x-camera;if(assets.ground&&assets.ground.complete&&assets.ground.naturalWidth){for(let yy=y;yy<H;yy+=T)sprite('ground',px,yy,16,16);continue;}rect(px,y,T,H-y,theme===0?'#bb7546':'#74524b');rect(px,y,T,3,theme===0?'#d7a06d':'#9b8881');for(let yy=y+17;yy<H;yy+=16){rect(px,yy,16,2,'#884422');rect(px+7,yy+2,2,14,'#884422');}}}
+function drawSolid(s){let x=s.x-camera;if(x<-60||x>W+60)return;let y=s.y;if(s.type==='pipe'){
+ const im=assets.pipe;if(im&&im.complete&&im.naturalWidth){g.drawImage(im,0,0,im.width,16,Math.round(x),Math.round(y),32,16);if(s.h>16)g.drawImage(im,0,16,im.width,im.height-16,Math.round(x),Math.round(y+16),32,Math.round(s.h-16));return;}
+ rect(x,y,s.w,s.h,'#17853b');rect(x-3,y,s.w+6,9,'#32bb54');rect(x-3,y,3,9,'#11652c');rect(x+s.w,y,3,9,'#0b5225');
+ rect(x+4,y+2,5,5,'#a2f19a');rect(x+8,y+10,5,s.h-10,'#69dc73');rect(x+s.w-8,y+10,5,s.h-10,'#0c572b');
+ rect(x-3,y+8,s.w+6,2,'#0c5d29');
+ }else if(s.type==='question'){const bump=s.bump>0?-Math.round(Math.sin((12-s.bump)/12*Math.PI)*5):0;if(s.used){if(!sprite('used',x,y+bump,16,16))drawBrickTile(x,y+bump,false);}else{const phase=Math.floor(frames/16)%2;g.save();g.filter=phase===0?'brightness(1.28) saturate(1.1)':'brightness(0.78) saturate(1.18)';drawBrickTile(x,y+bump,true);g.restore();}}else{for(let xx=0;xx<s.w;xx+=16)for(let yy=0;yy<s.h;yy+=16){drawBrickTile(x+xx,y+yy,false);}}}
+function drawEnemy(e){if(!e.alive)return;
+ const x=e.x-camera,y=e.y;
+ const im=assets.goomba;
+ if(im&&im.complete&&im.naturalWidth){
+  const flip=Math.floor((e.walk||0)/10)%2===1;
+  g.save();
+  if(flip){g.translate(Math.round(x)+16,0);g.scale(-1,1);g.drawImage(im,0,Math.round(y),16,16);}
+  else g.drawImage(im,Math.round(x),Math.round(y),16,16);
+  g.restore();return;
+ }
+rect(x+3,y+2,9,5,'#aa5a29');rect(x+1,y+7,13,7,'#a75b2e');rect(x+4,y+7,3,4,'#fff');rect(x+9,y+7,3,4,'#fff');rect(x+5,y+8,2,3,'#22150d');rect(x+10,y+8,2,3,'#22150d');rect(x,y+13,5,3,'#4c2919');rect(x+10,y+13,5,3,'#4c2919');}
+// Pixel sprites are newly drawn for this project, not extracted from a commercial ROM.
+const SPRITES={
+ run1:[
+'.....RRRRR......','....RRRRRRRRR...','....BBBSSS......','...BSBSSSSSS....','...BSBBSSSSSS...','...BBSSSSBBB....','.....SSSSSS.....','....RRBRRRR......','...RRRBRRRRR.....','..SSRRBBRRSS.....','..SSBBBBBBSS.....','...BBBBBBBB......','...BBBBBBBB......','...BBB..BBB......','..DDD....DDD.....','..DDDD...DDDD....'],
+ run2:[
+'.....RRRRR......','....RRRRRRRRR...','....BBBSSS......','...BSBSSSSSS....','...BSBBSSSSSS...','...BBSSSSBBB....','.....SSSSSS.....','....RRBRRRR......','...RRRBRRRRR.....','..SSRRBBRRSS.....','..SSBBBBBBSS.....','...BBBBBBBB......','....BBBBBB.......','...BBB.BBB.......','..DDD...DDD......','..DDDD..DDDD.....'],
+ jump:[
+'.....RRRRR......','....RRRRRRRRR...','....BBBSSS......','...BSBSSSSSS....','...BSBBSSSSSS...','...BBSSSSBBB....','.....SSSSSS.....','..SSRRBRRRR......','..SSRRBRRRRR.....','...RRRBBRRSS.....','...BBBBBBBBSS....','....BBBBBBB......','....BBBBBB.......','...BBB..BBB......','..DDD....DDD.....','..DDDD...DDDD....']
+};
+const PIX={R:'#e83c2e',B:'#744027',S:'#f8b88c',D:'#553021'};
+function drawHero(){
+ if(hero.inv>0&&Math.floor(frames/5)%2===0)return;
+ // The provided running sprite doubles as an airborne pose until a dedicated jump sprite arrives.
+ const frameName=!hero.on?'mario_frame_10':('mario_frame_'+String(Math.floor(hero.anim/(hero.running?2.6:6.4))%10).padStart(2,'0'));
+ if(sprite(frameName,hero.x-camera-2,hero.y,16,16))return;
+ if(hero.inv>0&&Math.floor(frames/5)%2===0)return;
+ const x=Math.round(hero.x-camera)-2,y=Math.round(hero.y);
+ const frame=!hero.on?'jump':Math.floor(hero.anim/(hero.running?3:7))%2?'run1':'run2';
+ const p=SPRITES[frame];
+ // 16x16 character with hand-drawn red cap, face, moustache, blue dungarees, boots.
+ for(let j=0;j<p.length;j++)for(let i=0;i<p[j].length;i++){
+  const ch=p[j][i];if(ch==='.')continue;
+  let color=PIX[ch];
+  if(ch==='B'&&j>=8&&j<=13)color='#2266d1';
+  rect(x+i*2,y+j*2,2,2,color);
+ }
+ // golden overall clasps
+ rect(x+12,y+20,2,2,'#ffe066');rect(x+22,y+20,2,2,'#ffe066');
+}
+function drawBrickTile(x,y,question=false){if(question&&sprite("question",x,y,16,16))return;if(!question&&sprite("brick",x,y,16,16))return;
+ rect(x,y,16,16,question?'#e7a83d':'#b86d3e');
+ rect(x,y,16,1,'#ffce83');rect(x,y+15,16,1,'#68351f');
+ if(question){rect(x+5,y+3,6,2,'#fff0b3');rect(x+10,y+5,2,4,'#fff0b3');rect(x+7,y+8,4,2,'#fff0b3');rect(x+7,y+12,2,2,'#fff0b3');}
+ else{rect(x,y+7,16,2,'#72351e');rect(x+7,y,2,8,'#72351e');rect(x+3,y+9,2,7,'#72351e');rect(x+13,y+9,2,7,'#72351e');}
+}
+function drawHud(){
+ g.save();
+ g.imageSmoothingEnabled=false;
+ g.fillStyle='#ffffff';
+ g.textBaseline='top';
+ g.textAlign='left';
+ g.font='bold 9px monospace';
+ g.shadowColor='#303030';g.shadowOffsetX=1;g.shadowOffsetY=1;
+ g.fillText('MARIO',9,10);
+ g.fillText(String(Math.floor(score)).padStart(6,'0'),9,21);
+ g.fillText('×'+String(coinCount).padStart(2,'0'),90,21);
+ g.fillText('WORLD',137,10);
+ g.fillText(worldLabel(),151,21);
+ g.fillText('TIME',207,10);
+ g.fillText(String(stageTime).padStart(3,'0'),211,21);
+ g.fillText('LIFE '+lives,198,39);
+ g.shadowColor='transparent';g.shadowOffsetX=0;g.shadowOffsetY=0;
+ if(!sprite('coin',78,20,8,10)){
+  rect(79,22,6,8,'#e9a23a');rect(81,23,2,6,'#ffda68');
+ }
+ g.restore();
+}
+function draw(){bg();drawGround();for(const b of bridges){if(b.x+b.w<camera||b.x>camera+W)continue;for(let x=b.x;x<b.x+b.w;x+=T){if(!sprite('bridge',x-camera,b.y,16,8)){rect(x-camera,b.y,16,7,'#bd7133');rect(x-camera,b.y+7,16,1,'#653719');}}}for(const s of solids)drawSolid(s);for(const coin of coins)if(!coin.taken){let x=coin.x-camera;if(!sprite('coin',x,coin.y,10,16)){rect(x,coin.y,7,11,'#ffdd43');rect(x+2,coin.y+2,3,7,'#fff5a4');}}for(const p of pops){if(!sprite('coin',p.x-camera,p.y,10,16))rect(p.x-camera,p.y,9,14,'#ffd944');}for(const e of enemies)drawEnemy(e);let fx=finish-camera;if(fx>-32&&fx<W+32){if(!sprite('goal_flag',fx-8,352-160,31,160)){rect(fx,245,3,107,'#eee');rect(fx+3,246,24,15,'#49b34e');}}drawHero();drawHud();if(paused){rect(53,188,150,48,'#111');g.fillStyle='white';g.font='bold 16px monospace';g.fillText('PAUSED',95,217);}}
+let last=0,acc=0;function loop(t){if(!last)last=t;acc+=Math.min(80,t-last);last=t;while(acc>=16.6667){if(!paused)tick();acc-=16.6667;}draw();requestAnimationFrame(loop);}generate();requestAnimationFrame(loop);c.addEventListener('click',()=>paused=!paused);document.addEventListener('visibilitychange',()=>paused=document.hidden);
+})();
+</script></body></html>
